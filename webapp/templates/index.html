@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Optimiseur Planning Ateliers</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
+    <!-- Chart.js CSS (Optional, helps with responsiveness) -->
+    <style>
+        body { background-color: #f8f9fa; padding-top: 2rem; padding-bottom: 2rem; }
+        .container { max-width: 800px; }
+        .card { margin-bottom: 1.5rem; }
+        .card-header { background-color: #e9ecef; font-weight: bold; }
+        .loader { display: none; margin: 15px auto; border: 5px solid #f3f3f3; border-top: 5px solid #0d6efd; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .stats-list dt { font-weight: bold; }
+        .stats-list dd { margin-bottom: 0.5rem; }
+        .stats-section { margin-top: 1rem; }
+        /* Container for chart to manage size */
+        .chart-container {
+            position: relative;
+            margin: 1.5rem auto;
+            height: 300px; /* Increased height for better visibility */
+            width: 100%;   
+            max-width: 650px; /* Increased max width for better use of space */
+        }
+        /* Stats card styling */
+        .stats-card {
+            border: 1px solid rgba(0,0,0,.125);
+            border-radius: 0.25rem;
+            padding: 1rem;
+            background-color: white;
+            box-shadow: 0 .125rem .25rem rgba(0,0,0,.075);
+            margin-bottom: 1rem;
+        }
+        .stats-heading {
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 0.5rem;
+            margin-bottom: 1rem;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="text-center mb-5">
+            <h1>Optimiseur Planning Ateliers</h1>
+            <p class="lead">Outil pour générer un planning optimisé basé sur les préférences des élèves.</p>
+        </header>
+
+        <div class="row">
+            <!-- Step 1: Download Template -->
+            <div class="col-md-6">
+                <div class="card text-center shadow-sm">
+                    <div class="card-header">Étape 1: Télécharger le Modèle</div>
+                    <div class="card-body">
+                        <p class="card-text">Téléchargez le fichier modèle Excel. Remplissez les onglets "Ateliers" et "Preferences" avec vos données.</p>
+                        <a href="{{ url_for('download_template') }}" class="btn btn-secondary">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/></svg>
+                            Télécharger Template.xlsx
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 2: Upload File -->
+            <div class="col-md-6">
+                <div class="card shadow-sm">
+                    <div class="card-header">Étape 2: Lancer l'Optimisation</div>
+                    <div class="card-body">
+                        <form id="upload-form" method="POST" action="{{ url_for('upload_file') }}" enctype="multipart/form-data">
+                            <div class="mb-3">
+                                <label for="file" class="form-label">Sélectionnez votre fichier Template.xlsx rempli:</label>
+                                <input class="form-control" type="file" id="file" name="file" accept=".xlsx" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-gear-fill me-1" viewBox="0 0 16 16"><path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/></svg>
+                                Lancer l'Optimisation
+                            </button>
+                        </form>
+                        <div id="loader" class="loader mt-3"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Area -->
+        {% if message %}
+        <div class="mt-4">
+            <div class="alert {{ 'alert-success' if success else 'alert-danger' }}" role="alert">
+                <h4 class="alert-heading">{{ "Résultat de l'Optimisation" if success else "Erreur" }}</h4>
+                <p>{{ message }}</p>
+
+                {% if success and stats %}
+                <hr>
+                
+                {% if filename %}
+                    <div class="text-center mb-4"> <!-- Download button moved up, margin-bottom added -->
+                        <a href="{{ url_for('download_result', filename=filename) }}" class="btn btn-success btn-lg"> <!-- Added btn-lg to make it more prominent -->
+                           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-file-earmark-excel-fill me-1" viewBox="0 0 16 16"><path d="M9.293 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.707A1 1 0 0 0 13.707 4L10 .293A1 1 0 0 0 9.293 0zM9.5 3.5v-2l3 3h-2a1 1 0 0 1-1-1zM5.884 6.68 8 9.219l2.116-2.54a.5.5 0 1 1 .768.641L8.651 10l2.233 2.68a.5.5 0 0 1-.768.64L8 10.781l-2.116 2.54a.5.5 0 0 1-.768-.641L7.349 10 5.116 7.32a.5.5 0 1 1 .768-.64z"/></svg>
+                           Télécharger le Planning Complet (.xlsx)
+                        </a>
+                    </div>
+                {% endif %}
+                
+                <div class="row">
+                    <div class="col-12">
+                        <!-- Statistics Section -->
+                        <div class="stats-card">
+                            <p class="stats-heading">Statistiques Générales:</p>
+                            <dl class="row stats-list mb-3">
+                                <dt class="col-sm-6">Préférences Satisfaites:</dt><dd class="col-sm-6">{{ stats.pref_count }} ({{ stats.pref_rate }})</dd>
+                                <dt class="col-sm-6">Vetos Forcés:</dt><dd class="col-sm-6">{{ stats.veto_count }}</dd>
+                                <dt class="col-sm-6">Affectations Neutres:</dt><dd class="col-sm-6">{{ stats.neutral_count }}</dd>
+                                <dt class="col-sm-6">Déviation Totale (vs Idéal):</dt><dd class="col-sm-6">{{ stats.total_deviation }}</dd>
+                                <dt class="col-sm-6">Élèves / Ateliers Traités:</dt><dd class="col-sm-6">{{ stats.students_processed }} / {{ stats.workshops_processed }}</dd>
+                            </dl>
+                        </div>
+
+                        <!-- Chart Section -->
+                        <div class="stats-card">
+                            <p class="stats-heading text-center">Distribution des Préférences / Élève:</p>
+                            <div class="chart-container">
+                                <canvas id="prefsChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {% endif %} {# End of success and stats block #}
+            </div> {# End of alert div #}
+        </div> {# End of results area div #}
+        {% endif %} {# End of message block #}
+
+        <footer class="text-center mt-5 text-muted">
+            <small>Optimiseur v1.4</small>
+        </footer>
+    </div>
+
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL" crossorigin="anonymous"></script>
+    <!-- Chart.js Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Custom JS -->
+    <script>
+        // Loader Script (runs always)
+        const uploadForm = document.getElementById('upload-form');
+        if (uploadForm) {
+            uploadForm.addEventListener('submit', function() {
+                document.getElementById('loader').style.display = 'block';
+                const submitButton = this.querySelector('button[type=submit]');
+                if (submitButton) {
+                    submitButton.disabled = true;
+                    submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Optimisation en cours...';
+                }
+            });
+        }
+
+        // Chart Generation Script (conditional execution based on Jinja variables)
+        // We need to disable JavaScript linting for Jinja template tags
+        
+        /* Start of Jinja template section - VS Code may show errors here but it works fine */
+        // @ts-nocheck
+        /* Jinja IF statement begins here - processed server-side before sending to browser */
+        
+        // The following code is executed only when the optimization is successful
+        {% if success and stats and stats.prefs_distribution is defined %}
+            // --- Safely get data from Jinja ---
+            const preferencesDistributionData = JSON.parse('{{ stats.prefs_distribution | tojson | safe }}');
+            const maxPossiblePreferences = parseInt('{{ stats.max_prefs_possible | default(0) }}', 10);
+
+            // --- Prepare data for Chart.js ---
+            const chartLabels = [];
+            const chartDataPoints = [];
+
+            // Iterate from max down to 0 to prepare data arrays
+            for (let i = maxPossiblePreferences; i >= 0; i--) {
+                const studentCount = preferencesDistributionData[i] || 0;
+                chartLabels.push(i === 1 ? `${i} Préférence` : `${i} Préférences`);
+                chartDataPoints.push(studentCount);
+            }
+            // Reverse arrays so 0 prefs is on the left, max on the right
+            chartLabels.reverse();
+            chartDataPoints.reverse();
+
+            // --- Create Chart ---
+            const ctx = document.getElementById('prefsChart');
+            if (ctx) {
+                try {
+                    new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: chartLabels,
+                            datasets: [{
+                                label: 'Nombre d\'Élèves',
+                                data: chartDataPoints,
+                                backgroundColor: 'rgba(0, 123, 255, 0.6)',
+                                borderColor: 'rgba(0, 123, 255, 1)',
+                                borderWidth: 1,
+                                barPercentage: 0.7,
+                                categoryPercentage: 0.8
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            indexAxis: 'x',
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    title: {
+                                        display: true,
+                                        text: 'Nombre d\'Élèves',
+                                        font: { weight: 'bold' }
+                                    },
+                                    ticks: {
+                                        stepSize: 1
+                                    }
+                                },
+                                x: {
+                                    title: {
+                                        display: true,
+                                        text: 'Nombre de Préférences Satisfaites',
+                                        font: { weight: 'bold' }
+                                    }
+                                }
+                            },
+                            plugins: {
+                                legend: {
+                                    display: false
+                                },
+                                tooltip: {
+                                    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                                    titleFont: { weight: 'bold' }
+                                }
+                            }
+                        }
+                    });
+                } catch (error) {
+                    console.error("Erreur lors de la création du graphique Chart.js:", error);
+                    const chartContainer = document.querySelector('.chart-container');
+                    if(chartContainer) {
+                        chartContainer.innerHTML = "<p class='text-danger text-center'>Erreur lors de l'affichage du graphique.</p>";
+                    }
+                }
+            } else {
+                console.error("Canvas element 'prefsChart' not found when expected.");
+            }
+        {% endif %}
+        /* End of Jinja template section */
+    </script>
+</body>
+</html>
