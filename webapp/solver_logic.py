@@ -9,7 +9,7 @@ import traceback
 # --- Parameters and Config (Keep as is) ---
 PREF_REWARD = 10
 VETO_PENALTY = 1000
-DEVIATION_WEIGHT = 1
+DEVIATION_WEIGHT = 50
 EXTRA_NEUTRAL_PENALTY = 25
 ATELIERS_SHEET = "Ateliers"
 PREFERENCES_SHEET = "Preferences"
@@ -183,6 +183,8 @@ def run_optimization(input_excel_path, output_excel_path):
         student_pref_counts = defaultdict(int) # *** ADDED: Track prefs per student ***
         max_assignments_per_student = 0 # Track max assignments (can be < 5 if long workshops)
 
+        students_by_pref_count = defaultdict(list) # ADDED: To store students by pref count for the new sheet
+
         for s in student_ids:
             num_neutral_for_student = 0
             num_prefs_for_student = 0 # *** ADDED: Count prefs for this student ***
@@ -204,6 +206,7 @@ def run_optimization(input_excel_path, output_excel_path):
 
             student_neutral_counts[s] = num_neutral_for_student
             student_pref_counts[s] = num_prefs_for_student # *** ADDED: Store count ***
+            students_by_pref_count[num_prefs_for_student].append(student_dict[s]) # ADDED: Populate new dict
             max_assignments_per_student = max(max_assignments_per_student, assignments_for_student) # Update max
 
         # Calculate preference distribution
@@ -249,6 +252,21 @@ def run_optimization(input_excel_path, output_excel_path):
         stats_df = pd.DataFrame(stats_rows, columns=["Statistique", "Valeur"])
 
 
+        # --- ADDED: Prepare DataFrame for students by preference count ---
+        pref_count_student_data = []
+        # Sort by preference count for the sheet (e.g., 0 prefs first, then 1 pref, etc.)
+        for count_key in sorted(students_by_pref_count.keys()):
+            for student_detail in students_by_pref_count[count_key]:
+                pref_count_student_data.append({
+                    "Nb Préférences Satisfaites": count_key,
+                    "Nom": student_detail["nom"],
+                    "Prénom": student_detail["prenom"],
+                    "Classe": student_detail["classe"]
+                })
+        students_by_pref_df = pd.DataFrame(pref_count_student_data)
+        # --- END ADDED ---
+
+
         # --- WRITE OUTPUT (Keep as is) ---
         print(f"Écriture du fichier de sortie '{output_excel_path}'...")
         try:
@@ -257,6 +275,10 @@ def run_optimization(input_excel_path, output_excel_path):
                 if not activity_schedule_df.empty:
                     activity_schedule_df.to_excel(writer, sheet_name="Planning par Atelier", index=True, header=True)
                 stats_df.to_excel(writer, sheet_name="Résumé et Stats", index=False)
+                # ADDED: Write the new sheet
+                if not students_by_pref_df.empty:
+                    students_by_pref_df.to_excel(writer, sheet_name="Élèves par Nb Préférences", index=False)
+
             print("Écriture réussie.")
             success_msg = "Optimisation terminée avec succès."
             return True, success_msg, stats_summary
