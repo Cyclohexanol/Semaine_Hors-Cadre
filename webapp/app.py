@@ -78,7 +78,8 @@ def upload_file():
             print(f"Fichier uploadé sauvegardé: {input_path}")
 
             # --- Run the optimization ---
-            success, status_message, stats_summary = run_optimization(input_path, output_path)
+            category_weight = request.form.get('category_weight', 0, type=float)
+            success, status_message, stats_summary = run_optimization(input_path, output_path, category_diversity_weight=category_weight)
             # -----------------------------
 
             # Always try to clean up the uploaded input file
