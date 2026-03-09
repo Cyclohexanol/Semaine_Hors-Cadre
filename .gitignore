@@ -47,3 +47,7 @@ results/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Claude Code
+.claude/
+CLAUDE.md
