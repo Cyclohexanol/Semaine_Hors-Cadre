@@ -22,7 +22,7 @@ session_indices = {session: i for i, session in enumerate(EXPECTED_SESSIONS)}
 
 
 # --- Main optimization function ---
-def run_optimization(input_excel_path, output_excel_path, category_diversity_weight=0):
+def run_optimization(input_excel_path, output_excel_path, category_diversity_weight=0, progress_callback=None):
     """
     Runs the planning optimization.
 
@@ -35,12 +35,18 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         tuple: (success: bool, message: str, stats: dict | None)
                stats dictionary contains key metrics on success, otherwise None.
     """
+    def _progress(step, pct):
+        if progress_callback:
+            progress_callback(step, pct)
+
     t_start = time.time()
     print(f"Starting optimization for input: {input_excel_path}")
+    _progress("Démarrage...", 5)
     stats_summary = None
     try:
         # --- LECTURE DES DONNÉES (Keep as is) ---
         print("Lecture du fichier Excel...")
+        _progress("Lecture des données...", 10)
         try:
             activities_df = pd.read_excel(input_excel_path, sheet_name=ATELIERS_SHEET)
             prefs_df = pd.read_excel(input_excel_path, sheet_name=PREFERENCES_SHEET)
@@ -52,6 +58,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         # --- PRÉPARATION DES ATELIERS (Keep as is) ---
         print("Préparation des instances d'ateliers...")
+        _progress("Préparation des ateliers...", 20)
         activity_instances = []
         activity_dict = {}
         for idx, row in activities_df.iterrows():
@@ -90,6 +97,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         # --- PRÉPARATION DES PRÉFÉRENCES (Keep as is) ---
         print("Préparation des préférences élèves...")
+        _progress("Chargement des préférences...", 30)
         students = []
         student_dict = {}
         activity_codes_in_prefs = set(prefs_df.columns) - {"Nom", "Prénom", "Classe", "# Préférences"}
@@ -110,6 +118,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         # --- MODÈLE D'OPTIMISATION (Keep as is) ---
         t_model = time.time()
         print(f"Mise en place du modèle... (lecture: {t_model - t_start:.1f}s)")
+        _progress("Construction du modèle...", 40)
         def _safe(name): return name.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_').replace('-', '_')
         prob = pulp.LpProblem("PlanningAteliersWeb", pulp.LpMinimize)
         x = {s: {a_id: pulp.LpVariable(f"x_{s}_{a_id}", cat="Binary") for a_id in activity_dict} for s in student_ids}
@@ -152,6 +161,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         t_constraints = time.time()
         print(f"Ajout des contraintes... (variables: {t_constraints - t_model:.1f}s)")
+        _progress("Ajout des contraintes...", 55)
         for s in student_ids: prob += pulp.lpSum(activity_dict[a]['duration'] * x[s][a] for a in activity_dict) == TOTAL_SESSIONS, f"TotalDuration_{s}"
         for a in activity_dict: prob += pulp.lpSum(x[s][a] for s in student_ids) <= activity_dict[a]["max"], f"CapacitéMax_{a}"
         for a in activity_dict: n_a = pulp.lpSum(x[s][a] for s in student_ids); ideal = activity_dict[a]["ideal"]; prob += n_a - ideal <= dev[a], f"DevPos_{a}"; prob += ideal - n_a <= dev[a], f"DevNeg_{a}"
@@ -227,6 +237,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
             print(f"Phase 2: résolution complète avec diversité catégorielle...")
 
         print(f"Résolution du modèle... (contraintes: {time.time() - t_constraints:.1f}s)")
+        _progress("Résolution en cours...", 65)
         solver = pulp.PULP_CBC_CMD(
             msg=False,
             timeLimit=300,
@@ -245,6 +256,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         # --- PREPARE OUTPUT ---
         print("Préparation des fichiers de sortie...")
+        _progress("Préparation des résultats...", 85)
 
         # Cache all assignments once (avoids repeated pulp.value() calls)
         assignments = defaultdict(list)  # student -> list of assigned activity IDs
@@ -332,6 +344,12 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         category_diversity_distribution = dict(cat_div_dist) if track_categories else {}
 
+        # Compute new KPIs
+        num_students = len(student_ids)
+        fully_satisfied = prefs_distribution.get(TOTAL_SESSIONS, 0)
+        mostly_satisfied = sum(prefs_distribution.get(k, 0) for k in range(3, TOTAL_SESSIONS + 1))
+        pref_rate_float = round((total_pref_sessions / total_student_sessions) * 100, 1) if total_student_sessions else 0
+
         # Create the stats dictionary to return
         stats_summary = {
             "objective_value": f"{obj_value:.2f}" if isinstance(obj_value, (int, float)) else "N/A",
@@ -339,13 +357,18 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
             "veto_count": total_veto_sessions,
             "neutral_count": total_neutral_sessions,
             "pref_rate": pref_rate,
+            "pref_rate_float": pref_rate_float,
             "total_deviation": f"{total_deviation:.2f}",
             "avg_deviation": f"{average_deviation:.2f}",
             "total_assignments": total_student_sessions,
-            "students_processed": len(student_ids),
+            "students_processed": num_students,
             "workshops_processed": len(activity_instances),
             "prefs_distribution": dict(prefs_distribution),
             "max_prefs_possible": TOTAL_SESSIONS,
+            "fully_satisfied_count": fully_satisfied,
+            "fully_satisfied_pct": f"{100 * fully_satisfied / num_students:.1f}%" if num_students else "N/A",
+            "mostly_satisfied_count": mostly_satisfied,
+            "mostly_satisfied_pct": f"{100 * mostly_satisfied / num_students:.1f}%" if num_students else "N/A",
             "category_diversity_distribution": category_diversity_distribution,
             "categories": categories,
             "category_diversity_weight": category_diversity_weight
@@ -390,6 +413,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         # --- WRITE OUTPUT (Keep as is) ---
         print(f"Écriture du fichier de sortie '{output_excel_path}'...")
+        _progress("Écriture du fichier...", 95)
         try:
             with pd.ExcelWriter(output_excel_path, engine="xlsxwriter") as writer:
                 student_schedule_df.to_excel(writer, sheet_name="Planning par élève", index=False)

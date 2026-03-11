@@ -28,4 +28,4 @@ ENV FLASK_SECRET_KEY=change_this_to_a_secure_value_in_production
 RUN pip install gunicorn
 
 # Command to run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--threads", "4", "--worker-class", "gthread", "app:app"]
