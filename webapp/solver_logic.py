@@ -124,7 +124,13 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         # Category diversity variables and penalty
         category_penalty_term = 0
         if use_category_diversity:
-            y_cat = {s: {c: pulp.LpVariable(f"ycat_{_safe(s)}_{_safe(c)}", lowBound=0, upBound=1, cat="Continuous") for c in categories} for s in student_ids}
+            safe_categories = {c: _safe(c) for c in categories}
+            y_cat = {s: {c: pulp.LpVariable(f"ycat_{_safe(s)}_{safe_categories[c]}", lowBound=0, upBound=1, cat="Continuous") for c in categories} for s in student_ids}
+            # Pre-fix y_cat=0 for impossible student-category pairs (all workshops vetoed)
+            for s in student_ids:
+                for c in categories:
+                    if all(student_dict[s]["prefs"][activity_dict[a]["code"]] == -1 for a in category_workshops[c]):
+                        y_cat[s][c].upBound = 0
             category_penalty_term = category_diversity_weight * pulp.lpSum(
                 len(categories) - pulp.lpSum(y_cat[s][c] for c in categories)
                 for s in student_ids
@@ -169,12 +175,65 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
                 ss = safe_student_ids[s]
                 for c in categories:
                     cat_inst = category_workshops[c]
-                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{ss}_{_safe(c)}"
+                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{ss}_{safe_categories[c]}"
+                # Session-count upper bound: can't cover more categories than sessions
+                prob += pulp.lpSum(y_cat[s][c] for c in categories) <= TOTAL_SESSIONS, f"CatSessionBound_{ss}"
 
         # --- SOLVE THE MODEL ---
         t_solve = time.time()
-        print(f"Résolution du modèle... (contraintes: {t_solve - t_constraints:.1f}s)")
-        solver = pulp.PULP_CBC_CMD(msg=False, timeLimit=300, gapRel=0.01)
+        cbc_threads = os.cpu_count() or 1
+
+        # Warm-start: solve without category penalty first, then use as starting point
+        if use_category_diversity:
+            print(f"Phase 1: résolution sans diversité catégorielle (warm-start)...")
+            # Temporarily replace objective with category-free version
+            prob_warmup = pulp.LpProblem("WarmStart", pulp.LpMinimize)
+            # Re-use the same x, dev, w variables in a lightweight problem
+            x_warmup = {s: {a_id: pulp.LpVariable(f"xw_{s}_{a_id}", cat="Binary") for a_id in activity_dict} for s in student_ids}
+            dev_warmup = {a_id: pulp.LpVariable(f"devw_{a_id}", lowBound=0, cat="Continuous") for a_id in activity_dict}
+            z_warmup = {s: pulp.LpVariable(f"zw_{s}", lowBound=0, cat="Integer") for s in student_ids}
+            w_warmup = {s: pulp.LpVariable(f"ww_{s}", lowBound=0, cat="Continuous") for s in student_ids}
+            # Objective without category penalty
+            warmup_assignment = pulp.lpSum((-PREF_REWARD if student_dict[s]["prefs"][activity_dict[a_id]["code"]] == 1 else VETO_PENALTY if student_dict[s]["prefs"][activity_dict[a_id]["code"]] == -1 else 0) * x_warmup[s][a_id] for s in student_ids for a_id in activity_dict)
+            warmup_deviation = pulp.lpSum(DEVIATION_WEIGHT * dev_warmup[a_id] for a_id in dev_warmup)
+            warmup_neutral = pulp.lpSum(EXTRA_NEUTRAL_PENALTY * w_warmup[s] for s in student_ids)
+            prob_warmup += warmup_assignment + warmup_deviation + warmup_neutral, "WarmupCost"
+            # Same structural constraints
+            for s in student_ids: prob_warmup += pulp.lpSum(activity_dict[a]['duration'] * x_warmup[s][a] for a in activity_dict) == TOTAL_SESSIONS, f"TD_{s}"
+            for a in activity_dict: prob_warmup += pulp.lpSum(x_warmup[s][a] for s in student_ids) <= activity_dict[a]["max"], f"CM_{a}"
+            for a in activity_dict: n_a = pulp.lpSum(x_warmup[s][a] for s in student_ids); ideal = activity_dict[a]["ideal"]; prob_warmup += n_a - ideal <= dev_warmup[a], f"DP_{a}"; prob_warmup += ideal - n_a <= dev_warmup[a], f"DN_{a}"
+            for s in student_ids:
+                ss = safe_student_ids[s]
+                for code, rel_inst in code_to_instances.items():
+                    if len(rel_inst) > 1: prob_warmup += pulp.lpSum(x_warmup[s][a] for a in rel_inst) <= 1, f"UC_{ss}_{_safe(code)}"
+            for s in student_ids:
+                ss = safe_student_ids[s]
+                for sess in EXPECTED_SESSIONS:
+                    rel_inst = instances_covering_session[sess]
+                    if rel_inst: prob_warmup += pulp.lpSum(x_warmup[s][a] for a in rel_inst) <= 1, f"OV_{ss}_{safe_sessions[sess]}"
+            for s in student_ids: prob_warmup += z_warmup[s] == pulp.lpSum(neutral_indicator[s][a] * x_warmup[s][a] for a in activity_dict), f"ZD_{s}"; prob_warmup += w_warmup[s] >= z_warmup[s] - 1, f"WD_{s}"
+            # Solve warm-up (fast)
+            solver_warmup = pulp.PULP_CBC_CMD(msg=False, timeLimit=60, gapRel=0.01, threads=cbc_threads)
+            prob_warmup.solve(solver_warmup)
+            t_warmup = time.time()
+            print(f"Phase 1 terminée: {pulp.LpStatus[prob_warmup.status]} ({t_warmup - t_solve:.1f}s)")
+            # Transfer solution as warm-start
+            if prob_warmup.status == pulp.LpStatusOptimal:
+                for s in student_ids:
+                    for a_id in activity_dict:
+                        val = pulp.value(x_warmup[s][a_id])
+                        if val is not None:
+                            x[s][a_id].setInitialValue(val)
+            print(f"Phase 2: résolution complète avec diversité catégorielle...")
+
+        print(f"Résolution du modèle... (contraintes: {time.time() - t_constraints:.1f}s)")
+        solver = pulp.PULP_CBC_CMD(
+            msg=False,
+            timeLimit=300,
+            gapRel=0.03 if use_category_diversity else 0.01,
+            threads=cbc_threads,
+            warmStart=True if use_category_diversity else False,
+        )
         result_status = prob.solve(solver)
         t_solved = time.time()
         print(f"Statut du solveur : {pulp.LpStatus[prob.status]} (résolution: {t_solved - t_solve:.1f}s, total: {t_solved - t_start:.1f}s)")
