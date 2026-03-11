@@ -110,6 +110,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         # --- MODÈLE D'OPTIMISATION (Keep as is) ---
         t_model = time.time()
         print(f"Mise en place du modèle... (lecture: {t_model - t_start:.1f}s)")
+        def _safe(name): return name.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_').replace('-', '_')
         prob = pulp.LpProblem("PlanningAteliersWeb", pulp.LpMinimize)
         x = {s: {a_id: pulp.LpVariable(f"x_{s}_{a_id}", cat="Binary") for a_id in activity_dict} for s in student_ids}
         dev = {a_id: pulp.LpVariable(f"dev_{a_id}", lowBound=0, cat="Continuous") for a_id in activity_dict}
@@ -123,7 +124,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         # Category diversity variables and penalty
         category_penalty_term = 0
         if use_category_diversity:
-            y_cat = {s: {c: pulp.LpVariable(f"ycat_{s}_{c}".replace(' ','_').replace('/','_'), lowBound=0, upBound=1, cat="Continuous") for c in categories} for s in student_ids}
+            y_cat = {s: {c: pulp.LpVariable(f"ycat_{_safe(s)}_{_safe(c)}", lowBound=0, upBound=1, cat="Continuous") for c in categories} for s in student_ids}
             category_penalty_term = category_diversity_weight * pulp.lpSum(
                 len(categories) - pulp.lpSum(y_cat[s][c] for c in categories)
                 for s in student_ids
@@ -132,25 +133,31 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         prob += assignment_costs + deviation_costs + extra_neutral_penalty_term + category_penalty_term, "TotalCost"
 
         # --- CONTRAINTES ---
-        def _safe(name): return name.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_').replace('-', '_')
+        # Pre-compute lookups for constraint generation
+        safe_student_ids = {s: _safe(s) for s in student_ids}
+        code_to_instances = defaultdict(list)
+        for a_id, inst in activity_dict.items():
+            code_to_instances[inst["code"]].append(a_id)
+        instances_covering_session = defaultdict(list)
+        for a, inst_data in activity_dict.items():
+            for sess in inst_data['sessions_covered']:
+                if sess in session_indices: instances_covering_session[sess].append(a)
+        safe_sessions = {sess: _safe(sess) for sess in EXPECTED_SESSIONS}
+
         t_constraints = time.time()
         print(f"Ajout des contraintes... (variables: {t_constraints - t_model:.1f}s)")
         for s in student_ids: prob += pulp.lpSum(activity_dict[a]['duration'] * x[s][a] for a in activity_dict) == TOTAL_SESSIONS, f"TotalDuration_{s}"
         for a in activity_dict: prob += pulp.lpSum(x[s][a] for s in student_ids) <= activity_dict[a]["max"], f"CapacitéMax_{a}"
         for a in activity_dict: n_a = pulp.lpSum(x[s][a] for s in student_ids); ideal = activity_dict[a]["ideal"]; prob += n_a - ideal <= dev[a], f"DevPos_{a}"; prob += ideal - n_a <= dev[a], f"DevNeg_{a}"
-        unique_codes = set(inst["code"] for inst in activity_instances);
         for s in student_ids:
-            for code in unique_codes:
-                rel_inst = [a_id for a_id, inst in activity_dict.items() if inst["code"] == code];
-                if len(rel_inst) > 1: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"UniqueCode_{_safe(s)}_{_safe(code)}"
-        instances_covering_session = defaultdict(list);
-        for a, inst_data in activity_dict.items():
-            for sess in inst_data['sessions_covered']:
-                if sess in session_indices: instances_covering_session[sess].append(a)
+            ss = safe_student_ids[s]
+            for code, rel_inst in code_to_instances.items():
+                if len(rel_inst) > 1: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"UniqueCode_{ss}_{_safe(code)}"
         for s in student_ids:
+            ss = safe_student_ids[s]
             for sess in EXPECTED_SESSIONS:
                 rel_inst = instances_covering_session[sess]
-                if rel_inst: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"Overlap_{_safe(s)}_{_safe(sess)}"
+                if rel_inst: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"Overlap_{ss}_{safe_sessions[sess]}"
         for s in student_ids: prob += z[s] == pulp.lpSum(neutral_indicator[s][a] * x[s][a] for a in activity_dict), f"ZDef_{s}"; prob += w[s] >= z[s] - 1, f"WDef_{s}"
 
         # Category diversity constraints
@@ -159,9 +166,10 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         if use_category_diversity:
             print("Ajout des contraintes de diversité catégorielle...")
             for s in student_ids:
+                ss = safe_student_ids[s]
                 for c in categories:
                     cat_inst = category_workshops[c]
-                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{_safe(s)}_{_safe(c)}"
+                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{ss}_{_safe(c)}"
 
         # --- SOLVE THE MODEL ---
         t_solve = time.time()
@@ -178,81 +186,84 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         # --- PREPARE OUTPUT ---
         print("Préparation des fichiers de sortie...")
-        student_schedule_df = pd.DataFrame(columns=["Nom", "Prénom", "Classe"] + EXPECTED_SESSIONS)
-        activity_schedule_df = pd.DataFrame()
-        stats_df = pd.DataFrame(columns=["Statistique", "Valeur"])
 
-        # 1. Create student schedule (Keep as is)
+        # Cache all assignments once (avoids repeated pulp.value() calls)
+        assignments = defaultdict(list)  # student -> list of assigned activity IDs
+        for s in student_ids:
+            for a in activity_dict:
+                if x[s][a] is not None and pulp.value(x[s][a]) == 1:
+                    assignments[s].append(a)
+
+        # 1. Create student schedule
         output_rows_student = []
         for s in student_ids:
             stud = student_dict[s]; row = {"Nom": stud["nom"], "Prénom": stud["prenom"], "Classe": stud["classe"]}
             for session in EXPECTED_SESSIONS: row[session] = ""
-            assigned_sessions_check = set(); assigned_duration_check = 0
-            for a in activity_dict:
-                if x[s][a] is not None and pulp.value(x[s][a]) == 1:
-                    instance = activity_dict[a]; code = instance["code"]; covered_sessions = instance["sessions_covered"]
-                    assigned_duration_check += instance['duration']
-                    for session_covered in covered_sessions:
-                        if session_covered in assigned_sessions_check: print(f"ERREUR LOGIQUE (inattendu): Chevauchement {s} session {session_covered}")
-                        if session_covered in row: row[session_covered] = code; assigned_sessions_check.add(session_covered)
-                        else: print(f"Attention: Session {session_covered} ({code}) pas dans colonnes attendues.")
+            assigned_sessions_check = set()
+            for a in assignments[s]:
+                instance = activity_dict[a]; code = instance["code"]
+                for session_covered in instance["sessions_covered"]:
+                    if session_covered in assigned_sessions_check: print(f"ERREUR LOGIQUE (inattendu): Chevauchement {s} session {session_covered}")
+                    if session_covered in row: row[session_covered] = code; assigned_sessions_check.add(session_covered)
+                    else: print(f"Attention: Session {session_covered} ({code}) pas dans colonnes attendues.")
             output_rows_student.append(row)
         student_schedule_df = pd.DataFrame(output_rows_student, columns=["Nom", "Prénom", "Classe"] + EXPECTED_SESSIONS)
 
-        # 2. Create workshop schedule (Keep as is)
+        # 2. Create workshop schedule
         instance_student_lists = defaultdict(list); max_students = 0
+        for s in student_ids:
+            stud = student_dict[s]; label = f"{stud['nom']} {stud['prenom']} ({stud['classe']})"
+            for a in assignments[s]:
+                instance_student_lists[a].append(label)
         for a in activity_dict:
-            student_list = []
-            for s in student_ids:
-                if x[s][a] is not None and pulp.value(x[s][a]) == 1:
-                    stud = student_dict[s]; student_list.append(f"{stud['nom']} {stud['prenom']} ({stud['classe']})")
-            instance_student_lists[a] = sorted(student_list); max_students = max(max_students, len(student_list))
+            instance_student_lists[a] = sorted(instance_student_lists[a]); max_students = max(max_students, len(instance_student_lists[a]))
         row_labels = ["Code", "Description", "Enseignant", "Salle", "Session Début", "Sessions Couvertes", "Durée", "Max Élèves", "Idéal Élèves", "Nb Affectés", "--- Élèves ---"] + [f"Élève {i+1}" for i in range(max_students)]
         activity_data_for_df = {}
         for a in activity_dict:
-            inst = activity_dict[a]; students = instance_student_lists[a]; sessions_str = ", ".join(inst["sessions_covered"])
-            padded_students = students + [""] * (max_students - len(students))
-            instance_column_data = [inst["code"], inst["Description"], inst["Enseignant"], inst["Salle"], inst["session_start"], sessions_str, inst["duration"], inst["max"], inst["ideal"], len(students), ""] + padded_students
+            inst = activity_dict[a]; students_list = instance_student_lists[a]; sessions_str = ", ".join(inst["sessions_covered"])
+            padded_students = students_list + [""] * (max_students - len(students_list))
+            instance_column_data = [inst["code"], inst["Description"], inst["Enseignant"], inst["Salle"], inst["session_start"], sessions_str, inst["duration"], inst["max"], inst["ideal"], len(students_list), ""] + padded_students
             activity_data_for_df[f"Atelier_{inst['code']}_Inst{a}"] = instance_column_data
         activity_schedule_df = pd.DataFrame(activity_data_for_df)
         if not activity_schedule_df.empty: activity_schedule_df.index = row_labels
 
-        # --- Calculate statistics AND Preference Distribution ---
+        # --- Calculate statistics AND Preference Distribution (single pass) ---
         # KPI is session-based: a 2-session preferred workshop = 2 sessions satisfied out of TOTAL_SESSIONS
         stats_rows = [("Statut Final Solveur", pulp.LpStatus[prob.status])]
         total_pref_sessions = 0; total_veto_sessions = 0; total_neutral_sessions = 0
         total_deviation = sum(pulp.value(dev[a]) or 0 for a in dev)
         student_neutral_counts = defaultdict(int)
-        student_pref_sessions = defaultdict(int)  # Sessions satisfied per student
-
+        prefs_distribution = defaultdict(int)
         students_by_pref_sessions = defaultdict(list)
+        track_categories = bool(categories)
+        cat_div_dist = defaultdict(int)
 
         for s in student_ids:
             neutral_sessions_for_student = 0
             pref_sessions_for_student = 0
-            for a in activity_dict:
-                if x[s][a] is not None and pulp.value(x[s][a]) == 1:
-                    instance = activity_dict[a]; act_code = instance["code"]
-                    vote = student_dict[s]["prefs"][act_code]
-                    duration = instance["duration"]
+            cats_covered = set() if track_categories else None
+            for a in assignments[s]:
+                instance = activity_dict[a]; act_code = instance["code"]
+                vote = student_dict[s]["prefs"][act_code]
+                duration = instance["duration"]
 
-                    if vote == 1:
-                        total_pref_sessions += duration
-                        pref_sessions_for_student += duration
-                    elif vote == -1:
-                        total_veto_sessions += duration
-                    else:
-                        total_neutral_sessions += duration
-                        neutral_sessions_for_student += duration
+                if vote == 1:
+                    total_pref_sessions += duration
+                    pref_sessions_for_student += duration
+                elif vote == -1:
+                    total_veto_sessions += duration
+                else:
+                    total_neutral_sessions += duration
+                    neutral_sessions_for_student += duration
+
+                if track_categories and instance["category"]:
+                    cats_covered.add(instance["category"])
 
             student_neutral_counts[s] = neutral_sessions_for_student
-            student_pref_sessions[s] = pref_sessions_for_student
+            prefs_distribution[pref_sessions_for_student] += 1
             students_by_pref_sessions[pref_sessions_for_student].append(student_dict[s])
-
-        # Distribution: how many students have X sessions satisfied (out of TOTAL_SESSIONS)
-        prefs_distribution = defaultdict(int)
-        for s_id in student_ids:
-            prefs_distribution[student_pref_sessions[s_id]] += 1
+            if track_categories:
+                cat_div_dist[f"{len(cats_covered)}/{len(categories)}"] += 1
 
         # Continue with other stats
         average_deviation = total_deviation / len(activity_instances) if activity_instances else 0
@@ -260,23 +271,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         total_student_sessions = TOTAL_SESSIONS * len(student_ids)
         pref_rate = f"{round((total_pref_sessions / total_student_sessions) * 100, 1)}%" if total_student_sessions else "N/A"
 
-        # Category diversity stats
-        category_diversity_distribution = {}
-        if categories:
-            student_category_counts = {}
-            for s in student_ids:
-                cats_covered = set()
-                for a in activity_dict:
-                    if x[s][a] is not None and pulp.value(x[s][a]) == 1:
-                        cat = activity_dict[a]["category"]
-                        if cat:
-                            cats_covered.add(cat)
-                student_category_counts[s] = len(cats_covered)
-            cat_div_dist = defaultdict(int)
-            for s in student_ids:
-                key = f"{student_category_counts[s]}/{len(categories)}"
-                cat_div_dist[key] += 1
-            category_diversity_distribution = dict(cat_div_dist)
+        category_diversity_distribution = dict(cat_div_dist) if track_categories else {}
 
         # Create the stats dictionary to return
         stats_summary = {
