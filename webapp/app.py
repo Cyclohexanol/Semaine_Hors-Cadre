@@ -1,6 +1,7 @@
 # app.py
 import os
 import uuid
+import time
 import datetime # Import datetime module
 from flask import Flask, request, render_template, send_from_directory, redirect, url_for, flash
 from werkzeug.utils import secure_filename
@@ -79,7 +80,9 @@ def upload_file():
 
             # --- Run the optimization ---
             category_weight = request.form.get('category_weight', 0, type=float)
+            t_start = time.time()
             success, status_message, stats_summary = run_optimization(input_path, output_path, category_diversity_weight=category_weight)
+            solve_time = time.time() - t_start
             # -----------------------------
 
             # Always try to clean up the uploaded input file
@@ -95,7 +98,8 @@ def upload_file():
                                        message=status_message,
                                        success=True,
                                        filename=human_readable_output_filename, # Pass the correct name
-                                       stats=stats_summary)
+                                       stats=stats_summary,
+                                       solve_time=round(solve_time, 1))
             else:
                 # If failed, try to clean up the output file path (which might not have been created)
                 if os.path.exists(output_path):
@@ -108,7 +112,8 @@ def upload_file():
                                        message=status_message,
                                        success=False,
                                        filename=None,
-                                       stats=None)
+                                       stats=None,
+                                       solve_time=round(solve_time, 1))
 
         except Exception as e:
             print(f"Erreur inattendue dans la route /upload: {e}")
