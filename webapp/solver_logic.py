@@ -4,6 +4,7 @@ import pulp
 from collections import defaultdict
 import math
 import os
+import time
 import traceback
 
 # --- Parameters and Config (Keep as is) ---
@@ -34,6 +35,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         tuple: (success: bool, message: str, stats: dict | None)
                stats dictionary contains key metrics on success, otherwise None.
     """
+    t_start = time.time()
     print(f"Starting optimization for input: {input_excel_path}")
     stats_summary = None
     try:
@@ -73,11 +75,12 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         print(f"{len(activity_instances)} instances d'ateliers chargées.")
 
         # Build category mapping for diversity constraint
-        categories = sorted(set(inst["category"] for inst in activity_instances if inst["category"]))
         category_workshops = defaultdict(list)
         for a_id, inst in activity_dict.items():
             if inst["category"]:
                 category_workshops[inst["category"]].append(a_id)
+        # Only keep categories that have at least one workshop
+        categories = sorted(c for c in category_workshops if len(category_workshops[c]) > 0)
         use_category_diversity = category_diversity_weight > 0 and len(categories) >= 2
         if use_category_diversity:
             print(f"{len(categories)} catégories détectées: {', '.join(categories)}")
@@ -105,7 +108,8 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
 
         # --- MODÈLE D'OPTIMISATION (Keep as is) ---
-        print("Mise en place du modèle...")
+        t_model = time.time()
+        print(f"Mise en place du modèle... (lecture: {t_model - t_start:.1f}s)")
         prob = pulp.LpProblem("PlanningAteliersWeb", pulp.LpMinimize)
         x = {s: {a_id: pulp.LpVariable(f"x_{s}_{a_id}", cat="Binary") for a_id in activity_dict} for s in student_ids}
         dev = {a_id: pulp.LpVariable(f"dev_{a_id}", lowBound=0, cat="Continuous") for a_id in activity_dict}
@@ -119,7 +123,7 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         # Category diversity variables and penalty
         category_penalty_term = 0
         if use_category_diversity:
-            y_cat = {s: {c: pulp.LpVariable(f"ycat_{s}_{c}".replace(' ','_').replace('/','_'), cat="Binary") for c in categories} for s in student_ids}
+            y_cat = {s: {c: pulp.LpVariable(f"ycat_{s}_{c}".replace(' ','_').replace('/','_'), lowBound=0, upBound=1, cat="Continuous") for c in categories} for s in student_ids}
             category_penalty_term = category_diversity_weight * pulp.lpSum(
                 len(categories) - pulp.lpSum(y_cat[s][c] for c in categories)
                 for s in student_ids
@@ -127,8 +131,10 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
 
         prob += assignment_costs + deviation_costs + extra_neutral_penalty_term + category_penalty_term, "TotalCost"
 
-        # --- CONTRAINTES (Keep as is) ---
-        print("Ajout des contraintes...")
+        # --- CONTRAINTES ---
+        def _safe(name): return name.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_').replace('-', '_')
+        t_constraints = time.time()
+        print(f"Ajout des contraintes... (variables: {t_constraints - t_model:.1f}s)")
         for s in student_ids: prob += pulp.lpSum(activity_dict[a]['duration'] * x[s][a] for a in activity_dict) == TOTAL_SESSIONS, f"TotalDuration_{s}"
         for a in activity_dict: prob += pulp.lpSum(x[s][a] for s in student_ids) <= activity_dict[a]["max"], f"CapacitéMax_{a}"
         for a in activity_dict: n_a = pulp.lpSum(x[s][a] for s in student_ids); ideal = activity_dict[a]["ideal"]; prob += n_a - ideal <= dev[a], f"DevPos_{a}"; prob += ideal - n_a <= dev[a], f"DevNeg_{a}"
@@ -136,36 +142,34 @@ def run_optimization(input_excel_path, output_excel_path, category_diversity_wei
         for s in student_ids:
             for code in unique_codes:
                 rel_inst = [a_id for a_id, inst in activity_dict.items() if inst["code"] == code];
-                if len(rel_inst) > 1: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"UniqueCode_{s}_{code}"
+                if len(rel_inst) > 1: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"UniqueCode_{_safe(s)}_{_safe(code)}"
         instances_covering_session = defaultdict(list);
         for a, inst_data in activity_dict.items():
             for sess in inst_data['sessions_covered']:
                 if sess in session_indices: instances_covering_session[sess].append(a)
         for s in student_ids:
-            safe_s_id = s.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_')
             for sess in EXPECTED_SESSIONS:
                 rel_inst = instances_covering_session[sess]
-                if rel_inst: safe_sess = sess.replace(' ','_').replace('-','_').replace('/','_').replace(':','_'); prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"Overlap_{safe_s_id}_{safe_sess}"
+                if rel_inst: prob += pulp.lpSum(x[s][a] for a in rel_inst) <= 1, f"Overlap_{_safe(s)}_{_safe(sess)}"
         for s in student_ids: prob += z[s] == pulp.lpSum(neutral_indicator[s][a] * x[s][a] for a in activity_dict), f"ZDef_{s}"; prob += w[s] >= z[s] - 1, f"WDef_{s}"
 
         # Category diversity constraints
+        # Only CatMax needed: y_cat[s][c] <= sum(x[s][a]) forces y=0 when no workshop assigned.
+        # The objective maximizes y_cat, so the solver sets y=1 whenever allowed — no >= needed.
         if use_category_diversity:
             print("Ajout des contraintes de diversité catégorielle...")
             for s in student_ids:
-                safe_s = s.replace('/', '_').replace('\\', '_').replace(':', '_').replace(' ', '_')
                 for c in categories:
-                    safe_c = c.replace(' ','_').replace('/','_').replace(':','_').replace('-','_')
                     cat_inst = category_workshops[c]
-                    # y_cat[s][c] = 1 if student has at least one workshop in category c
-                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{safe_s}_{safe_c}"
-                    for a in cat_inst:
-                        prob += y_cat[s][c] >= x[s][a], f"CatMin_{safe_s}_{safe_c}_{a}"
+                    prob += y_cat[s][c] <= pulp.lpSum(x[s][a] for a in cat_inst), f"CatMax_{_safe(s)}_{_safe(c)}"
 
-        # --- SOLVE THE MODEL (Keep as is) ---
-        print("Résolution du modèle...")
-        solver = pulp.PULP_CBC_CMD(msg=False, timeLimit=300)
+        # --- SOLVE THE MODEL ---
+        t_solve = time.time()
+        print(f"Résolution du modèle... (contraintes: {t_solve - t_constraints:.1f}s)")
+        solver = pulp.PULP_CBC_CMD(msg=False, timeLimit=300, gapRel=0.01)
         result_status = prob.solve(solver)
-        print("Statut du solveur :", pulp.LpStatus[prob.status])
+        t_solved = time.time()
+        print(f"Statut du solveur : {pulp.LpStatus[prob.status]} (résolution: {t_solved - t_solve:.1f}s, total: {t_solved - t_start:.1f}s)")
         optimal_solution_found = (prob.status == pulp.LpStatusOptimal)
         if not optimal_solution_found:
             status_text = pulp.LpStatus[prob.status]; msg = f"ERREUR: Solution optimale non trouvée (statut: {status_text})."
